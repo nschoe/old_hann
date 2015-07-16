@@ -1,22 +1,22 @@
 module FeedForward ( NeuralNetwork
                    , WeightMatrix
                    , ActivationFunction
+                   , LearningRateStrategy (..)
+                   , BackPropStrategy (..)
                    , sigmoid
                    , sigmoid'
-                   , dim
                    , getStructure
                    , getWeights
                    , getActivationFunction
-                   , generateRandomWeights
-                   , generateRandomWeights_
                    , mkNeuralNetwork
-                   , mkRandomNeuralNetwork
-                   , mkRandomNeuralNetwork_
+                   , test
                    ) where
 
 import Data.Vector (Vector(..))
-import qualified Data.Vector as V
-import System.Random
+import qualified Data.Vector as V (singleton, scanl, scanr, fromList, toList, zip, last, tail, init, zipWith3)
+import System.Random (getStdGen, randomRs)
+import Numeric.LinearAlgebra.HMatrix
+import Debug.Trace (trace)
 
 -- | Activation function for neurons in a layer
 type ActivationFunction = Double -> Double
@@ -30,7 +30,26 @@ sigmoid' :: Double -> Double
 sigmoid' x = sigmoid (x) * (1 - sigmoid x)
 
 -- Matrix of weights between two layers
-type WeightMatrix = Vector (Vector Double)
+type WeightMatrix = Matrix Double
+
+-- List of number of units in each layer, first layer is input, last is output
+type Structure = [Int]
+
+-- Learning rate strategy for training
+data LearningRateStrategy = FixedRate Double -- Learning rate alpha will remain constant
+                          deriving (Show, Eq)
+
+-- | The Gradient Descent Strategy to use with BackPropagation
+data BackPropStrategy = BatchGradientDescent         -- Accumulate error on all cases before performing a weights update
+                      | MiniBatchGradientDescent Int -- Update weights after N computations
+                      | OnlineGradientDescent        -- a.k.a "stochastic", this is mini batch with N=1 : update weights after each training case
+                        deriving (Show, Eq)
+
+-- | Type that defines a training example: a pair of the input vector and the target vector
+type TrainingExample = (Matrix Double, Matrix Double) -- Must be column vector
+
+-- | The training data set is the list of all training examples
+type TrainingSet = [TrainingExample]
 
 -- | Data type representing a Feed-Forward Neural Network
 data NeuralNetwork = NeuralNetwork
@@ -51,75 +70,122 @@ getWeights (NeuralNetwork {weights = w}) = w
 getActivationFunction :: NeuralNetwork -> (Double -> Double)
 getActivationFunction (NeuralNetwork {activationFunction = h}) = h
 
--- | Returns the dimensions of a weight matrix (nbLines, nbColumns)
-dim :: WeightMatrix -> (Int, Int)
-dim lines = (V.length lines, V.length . V.head $ lines)
+{- | Create a Feed-Forward Neural Network, whose weights are randomly initialized following this procedure:
+    - first, random weights are generated in the range (-1/√i, +1/√i) where i is the number of input neurons
+    - then use Nguyen Widrow method to readjust the weights distribution
 
-data NNError = StructureError String
-             | OtherError String
-             deriving (Show)
+    _Note_: Biais neurons are automatically added to each layer, so do not consider them
 
--- | Create a Feed-Forward Neural Network, ensuring weight matrix dimensions fit
-mkNeuralNetwork :: ActivationFunction -> [Int] -> [WeightMatrix] -> Either NNError NeuralNetwork
-mkNeuralNetwork _ [] _ = Left $ StructureError "Structure is empty"
-mkNeuralNetwork _ _ [] = Left $ StructureError "Weight matrix is empty"
-mkNeuralNetwork _ [_] _ = Left $ StructureError "A neural network must have at least one input and one output layer"
-mkNeuralNetwork _ _ [_] = Left $ StructureError "A neural network must have at least one weight matrix (from input to second layer)"
-mkNeuralNetwork h layers weights | length layers /= length weights + 1 = Left $ StructureError "For a K-layered Neural Network, you must have K-1 weight matrices"
-                               | checkDims layers weights == True = Right $ NeuralNetwork
-                                                                    { structure = layers
-                                                                    , weights = weights
-                                                                    , activationFunction = h
-                                                                    }
-                               | otherwise = Left $ StructureError "Weight matrix dimension not compatible with architecture. Matrix dimension for layer of size M to layer of size N must be (M, N)"
-  where checkDims :: [Int] -> [WeightMatrix] -> Bool
-        checkDims [lastLayer] [] = True
-        checkDims _ [] = False
-        checkDims (l1:l2:ls) (w1:ws) | dim w1 == (l1, l2) = checkDims (l2:ls) ws
-                                     | otherwise          = False
-        checkDims _ _ = False
+    _Note_: for now, the method is not perfect because it only computes h, i  and n for the irst layer, it should be done for all layers to be accurate. **TO FIX**
+-}
+mkNeuralNetwork :: ActivationFunction -> Structure -> IO NeuralNetwork
+mkNeuralNetwork _ xs | length xs < 2 = error "A Neural Network must have at least one input layer and an ouput layer, so your structure must contain at least 2 numbers"
+                     | any (<= 0) xs = error "You can't have zero or a negative number of units in a layer"
+mkNeuralNetwork h xs = do
+  let bound = 1.0 / sqrt i :: Double
+  initialRandomWeights <- getStdGen >>= return . randomRs (-bound, bound)
+  let weightMatrices = shapeWeightMatrices initialRandomWeights xs
+  return $ NeuralNetwork
+    { structure          = xs
+    , weights            = weightMatrices
+    , activationFunction = sigmoid
+    }
+{-
+  let beta = 0.7 * (h ** (1.0 / i))
+      n = sqrt (sum
+-}
+        where h = fromIntegral (xs !! 1) :: Double -- nb of hidden neurons
+              i = fromIntegral . head $ xs :: Double
 
--- | Create a Neural Network, whose weights are randomly initialized, given a range
-mkRandomNeuralNetwork :: RandomGen g => g -> ActivationFunction -> [Int] -> (Double, Double) -> Either NNError NeuralNetwork
-mkRandomNeuralNetwork _ h [] _ = mkNeuralNetwork h [] []
-mkRandomNeuralNetwork gen h xs (lowerBound, upperBound) =
-  let randomWeights = generateRandomWeights gen xs (lowerBound, upperBound)
-  in mkNeuralNetwork h xs randomWeights
+              shapeWeightMatrices :: [Double] -> Structure -> [WeightMatrix]
+              shapeWeightMatrices pool [_] = []
+              shapeWeightMatrices pool (l1:l2:xs) =
+                let l1' = l1 + 1
+                in (l1'><l2) pool : shapeWeightMatrices (drop (l1'*l2) pool) (l2:xs)
 
--- IO Version of `mkRandomNeuralNetwork_`
-mkRandomNeuralNetwork_ :: ActivationFunction -> [Int] -> (Double, Double) -> IO (Either NNError NeuralNetwork)
-mkRandomNeuralNetwork_ h [] _ = return $ mkNeuralNetwork h [] []
-mkRandomNeuralNetwork_ h xs (lowerBound, upperBound) = do
-  randomWeights <- generateRandomWeights_ xs (lowerBound, upperBound)
-  return $ mkNeuralNetwork h xs randomWeights
-  
-generateRandomLine :: [Double] -> Int -> (Vector Double, [Double])
-generateRandomLine pool n =
-  let (values, rest) = splitAt n pool
-  in (V.fromList values, rest)
+-- Run the Neural Network on the input matrix to get output matrix (automatically add biais neurons with value 1)
+runNN :: NeuralNetwork -> Matrix Double -> Matrix Double
+runNN nn input =
+  let ws = weights nn
+      h  = activationFunction nn
+  in foldl addOnesAndMultiply input ws
+     
+  where addOnesAndMultiply :: Matrix Double -> Matrix Double -> Matrix Double
+        addOnesAndMultiply input weights =
+          let (nbInput, _) = size input
+              input' = konst 1 (nbInput, 1) ||| input
+          in cmap h (input' <> weights)
 
-generateNRandomLines :: [Double] -> Int -> Int -> [Vector Double]
-generateNRandomLines pool 0 _ = []
-generateNRandomLines pool n dim =
-  let (oneLine, restOfPool) = generateRandomLine pool dim
-  in oneLine : generateNRandomLines restOfPool (n-1) dim
+        h = getActivationFunction nn
 
-generateRandomMatrix :: [Double] -> (Int, Int) -> Vector (Vector Double)
-generateRandomMatrix pool (rows, cols) = V.fromList $ generateNRandomLines pool rows cols
+-- Train the Neural Network with Backpropagation algorithm, make N passes on the input
+trainNTimes :: NeuralNetwork -> TrainingSet -> Int -> LearningRateStrategy -> BackPropStrategy -> NeuralNetwork
+trainNTimes nn _ 0 _ _ = nn
+trainNTimes nn trainingSet nTimes (FixedRate alpha) backpropStrat =
+  let newNN = trainOnce nn trainingSet alpha backpropStrat
+  -- Should shuffle the training set after each pass, to avoid cycling
+  in trace ("#" ++ show nTimes) $ trainNTimes newNN trainingSet (nTimes - 1) (FixedRate alpha) backpropStrat
 
-generateRandomWeights :: RandomGen g => g -> [Int] -> (Double, Double) -> [WeightMatrix]
-generateRandomWeights gen xs range =
-  let pool = randomRs range gen
-  in [generateRandomMatrix pool (l1, l2) | (l1, l2) <- zip xs (tail xs)]
+trainOnce :: NeuralNetwork -> TrainingSet -> Double -> BackPropStrategy -> NeuralNetwork
+trainOnce nn trainingSet alpha BatchGradientDescent =
+  let zeroDeltas = initEmptyDeltas (getStructure nn)
+      accDeltas  = foldl (updateNetwork nn) zeroDeltas trainingSet
+      partialDerivatives = map (/ m) accDeltas :: [Matrix Double]
+      currWeights = getWeights nn
+      updatedWeights = zipWith updateWeights currWeights partialDerivatives :: [WeightMatrix]
+  in nn {weights = updatedWeights}
+   
+      where initEmptyDeltas :: Structure -> [Matrix Double]
+            initEmptyDeltas [_] = []
+            initEmptyDeltas (l1:l2:xs) =
+              let l1' = l1 + 1
+              in (l1'><l2) (repeat 0) : initEmptyDeltas (l2:xs)
 
-generateRandomWeights_ :: [Int] -> (Double, Double) -> IO [WeightMatrix]
-generateRandomWeights_ xs range = do
-  pool <- getStdGen >>= return . randomRs range
-  return $ [generateRandomMatrix pool (l1, l2) | (l1, l2) <- zip xs (tail xs)]
+            m = fromIntegral . length $ trainingSet
 
--- Feed the Neural Network with data and get back results
-forwardPass :: NeuralNetwork -> [Vector Double] -> [Vector Double]
-forwardPass _ [] = []
-forwardPass nn (x:xs) =
-  let f = activationFunction nn
-      w = weights nn
+            updateWeights :: WeightMatrix -> Matrix Double -> WeightMatrix
+            updateWeights w deriv = w - scale alpha deriv
+
+updateNetwork :: NeuralNetwork -> [Matrix Double] -> TrainingExample -> [Matrix Double]
+updateNetwork nn deltas (input, target) =
+  let vectorWeights = V.fromList (getWeights nn)
+      -- First, compute all the unit's logits
+      zs = V.scanl forwardPass input vectorWeights
+
+      -- Second, compute error (delta) vectors for each layer
+      ds = V.scanr backprop (cmap h (V.last zs) - target) $ V.zip (V.tail . V.init $ zs) (V.tail vectorWeights)
+
+      -- Third, compute the Deltas
+  in zipWith3 accumDeltas deltas (V.toList zs) (V.toList ds)
+
+        where forwardPass :: Matrix Double -> WeightMatrix -> Matrix Double
+              forwardPass lastZ w = let lastA = cmap h lastZ -- element-wise sigmoid
+                                        lastA' = konst 1 (1,1) === lastA -- add biais
+                                    in tr w <> lastA' -- compute next logit
+
+              backprop :: (Matrix Double, WeightMatrix) -> Matrix Double -> Matrix Double
+              backprop (z, w) d = let prod  = dropRows 1 (w <> d)
+                                      deriv = cmap sigmoid' z
+                                  in prod * deriv -- element-wise product here
+
+              accumDeltas :: Matrix Double -> Matrix Double -> Matrix Double -> Matrix Double
+              accumDeltas delta z d = let a = konst 1 (1,1) === cmap h z
+                                      in delta + a <> tr d
+
+              h = getActivationFunction nn
+
+test :: IO ()
+test = do
+  nn <- mkNeuralNetwork sigmoid [2,2,1]
+  let raw = [[0,0],[0,1],[1,0],[1,1]] :: [[Double]]
+      rawSet = map (2><1) raw :: [Matrix Double]
+      m = length raw
+      n = length (head raw)
+      input = (m><n) (concat raw) :: Matrix Double
+  trace "Initial run:\n" $ putStrLn $ show $ runNN nn input
+  let target = map (1><1) [[0],[1],[1],[0]] :: [Matrix Double]
+      trainingSet = zip rawSet target
+      --newNN = trainOnce n trainingSet 0.1 BatchGradientDescent
+      newNN = trainNTimes nn trainingSet 1000 (FixedRate 0.5) BatchGradientDescent
+  --trace ("test newNN:\n" ++ show (getWeights newNN)) $ return ()
+  trace "Run after learning" $ putStrLn $ show $ runNN newNN input
