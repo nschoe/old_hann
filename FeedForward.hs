@@ -16,7 +16,7 @@ module FeedForward ( NeuralNetwork
 
 import           Data.List (foldl')
 import           Data.Vector (Vector(..))
-import qualified Data.Vector as V (singleton, scanl, scanr, fromList, toList, zip, last, head, tail, init, zipWith3, cons)
+import qualified Data.Vector as V (singleton, scanl', scanr', fromList, toList, zip, last, head, tail, init, zipWith3, cons)
 import           Debug.Trace (trace)
 import           Numeric.LinearAlgebra.HMatrix hiding (Vector)
 import           System.Random (randomRs, newStdGen)
@@ -160,10 +160,10 @@ updateNetwork nn deltas (input, target) =
       -}
       input' = konst 1 (1,1) === input
       w1     = (V.head vectorWeights)
-      zs = input `V.cons` V.scanl forwardPass (tr w1 <> input') (V.tail vectorWeights)
+      zs = input `V.cons` V.scanl' forwardPass (tr w1 <> input') (V.tail vectorWeights)
 
       -- Second, compute error (delta) vectors for each layer
-      ds = V.scanr backprop (cmap h (V.last zs) - target) $ V.zip (V.tail . V.init $ zs) (V.tail vectorWeights)
+      ds = V.scanr' backprop (cmap h (V.last zs) - target) $ V.zip (V.tail . V.init $ zs) (V.tail vectorWeights)
 
       -- Third, compute the Deltas
   in zipWith3 accumDeltas deltas (V.toList zs) (V.toList ds)
@@ -174,7 +174,7 @@ updateNetwork nn deltas (input, target) =
                                     in tr w <> lastA' -- compute next logit
 
               backprop :: (Matrix Double, WeightMatrix) -> Matrix Double -> Matrix Double
-              backprop (z, w) d = let prod  = dropRows 1 (w <> d)
+              backprop (z, w) d = let prod  = (dropRows 1 w) <> d
                                       deriv = cmap sigmoid' z
                                   in prod * deriv -- element-wise product here
 
@@ -200,10 +200,11 @@ test = do
   let target = map (1><1) [[0],[1],[1],[0]] :: [Matrix Double]
       trainingSet = zip rawSet target
       output = runNN nn input
-  let (newNN, costs) = trainNTimes (nn, []) trainingSet 1000 (FixedRate 0.8) BatchGradientDescent
+  let (newNN, costs) = trainNTimes (nn, []) trainingSet 10000 (FixedRate 0.8) BatchGradientDescent
   --putStrLn "Final Weights:\n"
   --mapM_ (putStrLn . show) (getWeights newNN)
   putStrLn "Final run:\n"
   putStrLn $ show $ runNN newNN input
   putStrLn "\nCosts:\n"
-  putStrLn $ show $ reverse costs
+  putStrLn $ show $ head $ costs
+--  putStrLn $ show $ reverse costs
