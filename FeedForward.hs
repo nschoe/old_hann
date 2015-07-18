@@ -16,10 +16,11 @@ module FeedForward ( NeuralNetwork
 
 import           Data.List (foldl')
 import           Data.Vector (Vector(..))
-import qualified Data.Vector as V (singleton, scanl, scanr, fromList, toList, zip, last, tail, init, zipWith3)
+import qualified Data.Vector as V (singleton, scanl, scanr, fromList, toList, zip, last, head, tail, init, zipWith3, cons)
 import           Debug.Trace (trace)
-import           Numeric.LinearAlgebra.HMatrix
+import           Numeric.LinearAlgebra.HMatrix hiding (Vector)
 import           System.Random (randomRs, newStdGen)
+import           System.Random.MWC
 
 -- | Activation function for neurons in a layer
 type ActivationFunction = Double -> Double
@@ -85,34 +86,26 @@ mkNeuralNetwork :: ActivationFunction -> Structure -> IO NeuralNetwork
 mkNeuralNetwork _ xs | length xs < 2 = error "A Neural Network must have at least one input layer and an ouput layer, so your structure must contain at least 2 numbers"
                      | any (<= 0) xs = error "You can't have zero or a negative number of units in a layer"
 mkNeuralNetwork h xs = do
-  --let bound = 1.0 / sqrt i :: Double
-  let bound = 10.0 / sqrt i :: Double
-  initialRandomWeights <- newStdGen >>= return . randomRs (-bound, bound)
-  let !weightMatrices = shapeWeightMatrices initialRandomWeights xs
-  putStrLn . show $ weightMatrices
+  let bound = 1 / sqrt d
+  initRandomWeights <- genInitWeights (zip xs (tail xs))
+  let !centeredWeights = map (cmap (\w -> (w * 2 * bound) - bound)) initRandomWeights
+  
   return $ NeuralNetwork
     { structure          = xs
-    , weights            = weightMatrices
-    , activationFunction = sigmoid
+    , weights            = centeredWeights
+    , activationFunction = h
     }
-{-
-  let beta = 0.7 * (h ** (1.0 / i))
-      n = sqrt (sum
--}
-        where h = fromIntegral (xs !! 1) :: Double -- nb of hidden neurons
-              i = fromIntegral . head $ xs :: Double -- nb of input features
 
-              shapeWeightMatrices :: [Double] -> Structure -> [WeightMatrix]
-              shapeWeightMatrices pool [_] = []
-              shapeWeightMatrices pool (l1:l2:xs) =
-                let l1' = l1 + 1
-                in (l1'><l2) pool : shapeWeightMatrices (drop (l1'*l2) pool) (l2:xs)
-
+        where d = fromIntegral . head $ xs :: Double -- nb of input features
+              genInitWeights = mapM $ \(n1,n2) -> do
+                let n1' = n1 + 1
+                vs <- withSystemRandom . asGenST $ \gen -> uniformVector gen (n1'*n2)
+                return $ (n1'><n2) $ V.toList vs
+                
 -- Run the Neural Network on the input matrix to get output matrix (automatically add biais neurons with value 1)
 runNN :: NeuralNetwork -> Matrix Double -> Matrix Double
 runNN nn input =
   let ws = weights nn
-      h  = activationFunction nn
   in foldl' addOnesAndMultiply input ws
      
   where addOnesAndMultiply :: Matrix Double -> Matrix Double -> Matrix Double
@@ -131,14 +124,14 @@ trainNTimes (nn, c) trainingSet nTimes (FixedRate alpha) backpropStrat =
       input = (4><2) (concat [[0,0],[0,1],[1,0],[1,1]]) :: Matrix Double
       target = (4><1) [0,1,1,0] :: Matrix Double
       output = runNN nn input
-      newC  = sumElements $ cmap (^2) (output - target)
+      newC  = 0.5 * (sumElements $ cmap (^2) (output - target))
   -- Should shuffle the training set after each pass, to avoid cycling
   in {-trace ("#" ++ show nTimes) $ -} {-trace ("Weights:\n" ++ show (getWeights newNN) ++ "\n") $-} trainNTimes (newNN, newC:c) trainingSet (nTimes - 1) (FixedRate alpha) backpropStrat
 
 trainOnce :: NeuralNetwork -> TrainingSet -> Double -> BackPropStrategy -> NeuralNetwork
 trainOnce nn trainingSet alpha BatchGradientDescent =
-  let zeroDeltas = initEmptyDeltas (getStructure nn)
-      accDeltas  = foldl' (updateNetwork nn) zeroDeltas trainingSet
+  let !zeroDeltas = initEmptyDeltas (getStructure nn)
+      !accDeltas  = foldl' (updateNetwork nn) zeroDeltas trainingSet
       !partialDerivatives = map (/ m) accDeltas :: [Matrix Double]
       currWeights = getWeights nn
       updatedWeights = zipWith updateWeights currWeights partialDerivatives :: [WeightMatrix]
@@ -158,8 +151,16 @@ trainOnce nn trainingSet alpha BatchGradientDescent =
 updateNetwork :: NeuralNetwork -> [Matrix Double] -> TrainingExample -> [Matrix Double]
 updateNetwork nn deltas (input, target) =
   let vectorWeights = V.fromList (getWeights nn)
-      -- First, compute all the unit's logits
-      zs = V.scanl forwardPass input vectorWeights
+      
+      {- First, compute all the unit's logits
+         Because of forwardPass's first action is to apply activation function,
+         we can't simply call 'scanl forwardPass input vectorWeights', so we manually
+         compute the first pass.
+         But the input won't appear in the return vector from scanl so we prepend it.
+      -}
+      input' = konst 1 (1,1) === input
+      w1     = (V.head vectorWeights)
+      zs = input `V.cons` V.scanl forwardPass (tr w1 <> input') (V.tail vectorWeights)
 
       -- Second, compute error (delta) vectors for each layer
       ds = V.scanr backprop (cmap h (V.last zs) - target) $ V.zip (V.tail . V.init $ zs) (V.tail vectorWeights)
@@ -191,14 +192,18 @@ test = do
       m = length raw
       n = length (head raw)
       input = (m><n) (concat raw) :: Matrix Double
-  trace "Initial run:\n" $ putStrLn $ show $ runNN nn input
+  --putStrLn $ "Initial Weights:\n"
+  --mapM_ (putStrLn . show) (getWeights nn)
+  putStrLn "Initial run:\n"
+  putStrLn $ show $ runNN nn input
+  
   let target = map (1><1) [[0],[1],[1],[0]] :: [Matrix Double]
       trainingSet = zip rawSet target
       output = runNN nn input
-      initialCost = sumElements $ cmap (^2) (output - (4><1) [0,1,1,0])
-  --putStrLn $ "training set: " ++ show trainingSet
-      --newNN = trainOnce n trainingSet 0.1 BatchGradientDescent
-  let (newNN, costs) = trainNTimes (nn, [initialCost]) trainingSet 1000 (FixedRate 0.5) BatchGradientDescent
-  --trace ("test newNN:\n" ++ show (getWeights newNN)) $ return ()
-  trace "Run after learning" $ putStrLn $ show $ runNN newNN input
-  trace "Costs:\n" $ putStrLn $ show $ reverse costs
+  let (newNN, costs) = trainNTimes (nn, []) trainingSet 1000 (FixedRate 0.8) BatchGradientDescent
+  --putStrLn "Final Weights:\n"
+  --mapM_ (putStrLn . show) (getWeights newNN)
+  putStrLn "Final run:\n"
+  putStrLn $ show $ runNN newNN input
+  putStrLn "\nCosts:\n"
+  putStrLn $ show $ reverse costs
