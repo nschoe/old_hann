@@ -22,6 +22,8 @@ import           Numeric.LinearAlgebra.HMatrix hiding (Vector)
 import           System.Random (randomRs, newStdGen)
 import           System.Random.MWC
 
+import Graphics.Rendering.Plot
+
 -- | Activation function for neurons in a layer
 type ActivationFunction = Double -> Double
 
@@ -81,26 +83,26 @@ getActivationFunction (NeuralNetwork {activationFunction = h}) = h
     _Note_: Biais neurons are automatically added to each layer, so do not consider them
 
     _Note_: for now, the method is not perfect because it only computes h, i  and n for the irst layer, it should be done for all layers to be accurate. **TO FIX**
--}
+v-}
 mkNeuralNetwork :: ActivationFunction -> Structure -> IO NeuralNetwork
 mkNeuralNetwork _ xs | length xs < 2 = error "A Neural Network must have at least one input layer and an ouput layer, so your structure must contain at least 2 numbers"
                      | any (<= 0) xs = error "You can't have zero or a negative number of units in a layer"
 mkNeuralNetwork h xs = do
-  let bound = 1 / sqrt d
-  initRandomWeights <- genInitWeights (zip xs (tail xs))
-  let !centeredWeights = map (cmap (\w -> (w * 2 * bound) - bound)) initRandomWeights
+  !initRandomWeights <- genInitWeights (zip xs (tail xs))
   
   return $ NeuralNetwork
     { structure          = xs
-    , weights            = centeredWeights
+    , weights            = initRandomWeights
     , activationFunction = h
     }
 
         where d = fromIntegral . head $ xs :: Double -- nb of input features
+              
               genInitWeights = mapM $ \(n1,n2) -> do
-                let n1' = n1 + 1
+                let bound = 0.5 * sqrt (6 / (fromIntegral (n1+n2))) :: Double -- bound value taken from Andrew Ng's class
+                    n1' = n1 + 1
                 vs <- withSystemRandom . asGenST $ \gen -> uniformVector gen (n1'*n2)
-                return $ (n1'><n2) $ V.toList vs
+                return $ cmap (\w -> (w * 2 * bound) - bound) $ (n1'><n2) $ V.toList vs -- zero-mean the weights
                 
 -- Run the Neural Network on the input matrix to get output matrix (automatically add biais neurons with value 1)
 runNN :: NeuralNetwork -> Matrix Double -> Matrix Double
@@ -126,14 +128,16 @@ trainNTimes (nn, c) trainingSet nTimes (FixedRate alpha) backpropStrat =
       output = runNN nn input
       newC  = 0.5 * (sumElements $ cmap (^2) (output - target))
   -- Should shuffle the training set after each pass, to avoid cycling
-  in {-trace ("#" ++ show nTimes) $ -} {-trace ("Weights:\n" ++ show (getWeights newNN) ++ "\n") $-} trainNTimes (newNN, newC:c) trainingSet (nTimes - 1) (FixedRate alpha) backpropStrat
+  in trainNTimes (newNN, newC:c) trainingSet (nTimes - 1) (FixedRate alpha) backpropStrat
 
 trainOnce :: NeuralNetwork -> TrainingSet -> Double -> BackPropStrategy -> NeuralNetwork
 trainOnce nn trainingSet alpha BatchGradientDescent =
   let !zeroDeltas = initEmptyDeltas (getStructure nn)
       !accDeltas  = foldl' (updateNetwork nn) zeroDeltas trainingSet
-      !partialDerivatives = map (/ m) accDeltas :: [Matrix Double]
+      -- !partialDerivatives = map (/ m) accDeltas :: [Matrix Double]
+      !rescaledDeltas = map (/ m) accDeltas :: [Matrix Double]
       currWeights = getWeights nn
+      !partialDerivatives = zipWith (regularize 0) rescaledDeltas currWeights
       updatedWeights = zipWith updateWeights currWeights partialDerivatives :: [WeightMatrix]
   in nn {weights = updatedWeights}
    
@@ -147,6 +151,12 @@ trainOnce nn trainingSet alpha BatchGradientDescent =
 
             updateWeights :: WeightMatrix -> Matrix Double -> WeightMatrix
             updateWeights w deriv = w - scale alpha deriv
+
+            regularize :: Double -> Matrix Double -> WeightMatrix -> Matrix Double
+            regularize lambda rDelta weight = let rDelta' = dropRows 1 rDelta
+                                                  weight' = dropRows 1 weight
+                                                  regu    = rDelta' + (scale lambda weight')
+                                              in takeRows 1 rDelta === regu
 
 updateNetwork :: NeuralNetwork -> [Matrix Double] -> TrainingExample -> [Matrix Double]
 updateNetwork nn deltas (input, target) =
@@ -180,18 +190,21 @@ updateNetwork nn deltas (input, target) =
 
               accumDeltas :: Matrix Double -> Matrix Double -> Matrix Double -> Matrix Double
               accumDeltas delta z d = let a = konst 1 (1,1) === cmap h z
-                                      in delta + a <> tr d
+                                      in delta + (a <> tr d)
 
               h = getActivationFunction nn
 
-test :: IO ()
-test = do
+-- usage: test "plot.png"
+test :: FilePath -> IO ()
+test fp = do
   nn <- mkNeuralNetwork sigmoid [2,2,1]
   let raw = [[0,0],[0,1],[1,0],[1,1]] :: [[Double]]
       rawSet = map (2><1) raw :: [Matrix Double]
       m = length raw
       n = length (head raw)
       input = (m><n) (concat raw) :: Matrix Double
+      nbPasses = 1000
+      alpha = 0.4
   --putStrLn $ "Initial Weights:\n"
   --mapM_ (putStrLn . show) (getWeights nn)
   putStrLn "Initial run:\n"
@@ -200,11 +213,25 @@ test = do
   let target = map (1><1) [[0],[1],[1],[0]] :: [Matrix Double]
       trainingSet = zip rawSet target
       output = runNN nn input
-  let (newNN, costs) = trainNTimes (nn, []) trainingSet 10000 (FixedRate 0.8) BatchGradientDescent
+  let (newNN, costs) = trainNTimes (nn, []) trainingSet nbPasses (FixedRate alpha) BatchGradientDescent
   --putStrLn "Final Weights:\n"
   --mapM_ (putStrLn . show) (getWeights newNN)
   putStrLn "Final run:\n"
   putStrLn $ show $ runNN newNN input
-  putStrLn "\nCosts:\n"
-  putStrLn $ show $ head $ costs
+--  putStrLn "\nCosts:\n"
+--  putStrLn $ show $ head $ costs
 --  putStrLn $ show $ reverse costs
+
+  -- Displaying the cost in the file
+  let ts = vector [1.. fromIntegral nbPasses]
+  let graph = do
+        plot (ts, [linepoint (vector (reverse costs)) (1.0::LineWidth, blue) (Cross, blue)])
+  
+        title "Cost Function"
+        subtitle $ "alpha = " ++ show alpha ++ "\n" ++ show nbPasses ++ " passes"
+  
+        xlabel "# Pass"
+        ylabel "Cost"
+        grid True
+  
+  writeFigure PNG fp (1024, 768) graph
