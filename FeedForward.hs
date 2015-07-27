@@ -64,6 +64,10 @@ data NeuralNetwork = NeuralNetwork
                      , activationFunction :: Double -> Double
                      }
 
+-- | for debugging purposes only: this is the epsilon for Numerical Gradient Checking
+epsilon :: Double
+epsilon = 0.001
+
 -- | Returns a Neural Network's architecture (since internal structure is not exposed)
 getStructure :: NeuralNetwork -> [Int]
 getStructure (NeuralNetwork {structure = s}) = s
@@ -134,12 +138,39 @@ trainOnce :: NeuralNetwork -> TrainingSet -> Double -> BackPropStrategy -> Neura
 trainOnce nn trainingSet alpha BatchGradientDescent =
   let !zeroDeltas = initEmptyDeltas (getStructure nn)
       !accDeltas  = foldl' (updateNetwork nn) zeroDeltas trainingSet
-      -- !partialDerivatives = map (/ m) accDeltas :: [Matrix Double]
       !rescaledDeltas = map (/ m) accDeltas :: [Matrix Double]
       currWeights = getWeights nn
       !partialDerivatives = zipWith (regularize 0) rescaledDeltas currWeights
-      updatedWeights = zipWith updateWeights currWeights partialDerivatives :: [WeightMatrix]
-  in nn {weights = updatedWeights}
+      !updatedWeights = trace ("Partial Derivatives:\n" ++ show partialDerivatives) $ zipWith updateWeights currWeights partialDerivatives :: [WeightMatrix]
+
+      -- Compute the matrices with the epsilon variation
+      [(ws1_p, ws1_m),(ws2_p, ws2_m)] = map numericalGradient currWeights
+
+      input = (4><2) (concat [[0,0],[0,1],[1,0],[1,1]]) :: Matrix Double
+      target = (4><1) [0,1,1,0] :: Matrix Double
+
+      -- Run all networks
+      !outputsPlusW1 = map (\w1_p -> runNN nn{weights = [w1_p, (head . tail $ currWeights)]} input) ws1_p
+      !outputsMinusW1 = map (\w1_m -> runNN nn{weights = [w1_m , (head . tail $ currWeights)]} input) ws1_m
+
+      !outputsPlusW2 = map (\w2_p -> runNN nn{weights = [(head currWeights), w2_p]} input) ws2_p
+      !outputsMinusW2 = map (\w2_m -> runNN nn{weights = [(head currWeights), w2_m]} input) ws2_m
+
+
+
+      !costPlusW1 = map (\oPlus -> 0.5 * (sumElements $ cmap (^2) (oPlus - target))) outputsPlusW1
+      !costMinusW1 = map (\oMinus -> 0.5 * (sumElements $ cmap (^2) (oMinus - target))) outputsMinusW1
+
+      !costPlusW2 = map (\oPlus -> 0.5 * (sumElements $ cmap (^2) (oPlus - target))) outputsPlusW2
+      !costMinusW2 = map (\oMinus -> 0.5 * (sumElements $ cmap (^2) (oMinus - target))) outputsMinusW2
+
+      !numDerivW1 = map (\(costPlus, costMinus) -> (costPlus - costMinus) / (2 * epsilon)) (zip costPlusW1 costMinusW1)
+      !numDerivW2 = map (\(costPlus, costMinus) -> (costPlus - costMinus) / (2 * epsilon)) (zip costPlusW2 costMinusW2)
+
+      !numericalGradientW1 = reshape 2 (vector numDerivW1)
+      !numericalGradientW2 = reshape 1 (vector numDerivW2)
+
+  in trace ("Numerical Gradient W1:\n" ++ show numericalGradientW1 ++ "\nNumerical Gradient W2:\n" ++ show numericalGradientW2) $ nn {weights = updatedWeights}
    
       where initEmptyDeltas :: Structure -> [Matrix Double]
             initEmptyDeltas [_] = []
@@ -157,6 +188,24 @@ trainOnce nn trainingSet alpha BatchGradientDescent =
                                                   weight' = dropRows 1 weight
                                                   regu    = rDelta' + (scale lambda weight')
                                               in takeRows 1 rDelta === regu
+
+            numericalGradient :: WeightMatrix -> ([Matrix Double], [Matrix Double])
+            numericalGradient w =
+              let (nR,nC) = size w
+                  indexes = [(x,y) | x <- [0..nR-1], y <- [0..nC-1]]
+                  pairs = zip (repeat w) indexes
+                  plusEpsilon = map (\(mat,ind) -> accum mat (+) [(ind,epsilon)]) pairs
+                  minusEpsilon = map (\(mat,ind) -> accum mat (+) [(ind,(-epsilon))]) pairs
+              in (plusEpsilon, minusEpsilon)
+                  
+                  
+
+                  
+
+                  
+
+--                  numDerivatives = map (\(cPlus, cMinus) -> (cPlus - cMinus) / (2 * epsilon)) (zip costPlus costMinus)
+--              in reshape nC (vector numDerivatives)
 
 updateNetwork :: NeuralNetwork -> [Matrix Double] -> TrainingExample -> [Matrix Double]
 updateNetwork nn deltas (input, target) =
@@ -203,12 +252,12 @@ test fp = do
       m = length raw
       n = length (head raw)
       input = (m><n) (concat raw) :: Matrix Double
-      nbPasses = 1000
+      nbPasses = 2
       alpha = 0.4
-  --putStrLn $ "Initial Weights:\n"
-  --mapM_ (putStrLn . show) (getWeights nn)
-  putStrLn "Initial run:\n"
-  putStrLn $ show $ runNN nn input
+--  putStrLn $ "Initial Weights:\n"
+--  mapM_ (putStrLn . show) (getWeights nn)
+--  putStrLn "Initial run:\n"
+--  putStrLn $ show $ runNN nn input
   
   let target = map (1><1) [[0],[1],[1],[0]] :: [Matrix Double]
       trainingSet = zip rawSet target
@@ -216,8 +265,8 @@ test fp = do
   let (newNN, costs) = trainNTimes (nn, []) trainingSet nbPasses (FixedRate alpha) BatchGradientDescent
   --putStrLn "Final Weights:\n"
   --mapM_ (putStrLn . show) (getWeights newNN)
-  putStrLn "Final run:\n"
-  putStrLn $ show $ runNN newNN input
+--  putStrLn "Final run:\n"
+--  putStrLn $ show $ runNN newNN input
 --  putStrLn "\nCosts:\n"
 --  putStrLn $ show $ head $ costs
 --  putStrLn $ show $ reverse costs
