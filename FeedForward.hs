@@ -89,27 +89,26 @@ mkNeuralNetwork _ xs | length xs < 2 = error "A Neural Network must have at leas
                      | any (<= 0) xs = error "You can't have zero or a negative number of units in a layer"
 mkNeuralNetwork h xs = do
   !initRandomWeights <- genInitWeights (zip xs (tail xs))
-  
+
   return $ NeuralNetwork
     { structure          = xs
     , weights            = initRandomWeights
     , activationFunction = h
     }
 
-        where d = fromIntegral . head $ xs :: Double -- nb of input features
-              
-              genInitWeights = mapM $ \(n1,n2) -> do
-                let bound = 0.5 * sqrt (6 / (fromIntegral (n1+n2))) :: Double -- bound value taken from Andrew Ng's class
-                    n1' = n1 + 1
-                vs <- withSystemRandom . asGenST $ \gen -> uniformVector gen (n1'*n2)
-                return $ cmap (\w -> (w * 2 * bound) - bound) $ (n1'><n2) $ V.toList vs -- zero-mean the weights
-                
+    where genInitWeights = mapM $ \(n1,n2) -> do
+            --let bound = 0.5 * sqrt (6 / (fromIntegral (n1+n2))) :: Double -- bound value taken from Andrew Ng's class
+            let bound = 1.0 / sqrt (fromIntegral n1)
+                n1' = n1 + 1
+            vs <- withSystemRandom . asGenST $ \gen -> uniformVector gen (n1'*n2)
+            return $ cmap (\w -> (w * 2 * bound) - bound) $ (n1'><n2) $ V.toList vs -- zero-mean the weights
+
 -- Run the Neural Network on the input matrix to get output matrix (automatically add biais neurons with value 1)
 runNN :: NeuralNetwork -> Matrix Double -> Matrix Double
 runNN nn input =
   let ws = weights nn
   in foldl' addOnesAndMultiply input ws
-     
+
   where addOnesAndMultiply :: Matrix Double -> Matrix Double -> Matrix Double
         addOnesAndMultiply input weights =
           let (nbInput, _) = size input
@@ -140,7 +139,7 @@ trainOnce nn trainingSet alpha BatchGradientDescent =
       !partialDerivatives = zipWith (regularize 0) rescaledDeltas currWeights
       updatedWeights = zipWith updateWeights currWeights partialDerivatives :: [WeightMatrix]
   in nn {weights = updatedWeights}
-   
+
       where initEmptyDeltas :: Structure -> [Matrix Double]
             initEmptyDeltas [_] = []
             initEmptyDeltas (l1:l2:xs) =
@@ -161,7 +160,7 @@ trainOnce nn trainingSet alpha BatchGradientDescent =
 updateNetwork :: NeuralNetwork -> [Matrix Double] -> TrainingExample -> [Matrix Double]
 updateNetwork nn deltas (input, target) =
   let vectorWeights = V.fromList (getWeights nn)
-      
+
       {- First, compute all the unit's logits
          Because of forwardPass's first action is to apply activation function,
          we can't simply call 'scanl forwardPass input vectorWeights', so we manually
@@ -204,12 +203,12 @@ test fp = do
       n = length (head raw)
       input = (m><n) (concat raw) :: Matrix Double
       nbPasses = 1000
-      alpha = 0.4
-  --putStrLn $ "Initial Weights:\n"
-  --mapM_ (putStrLn . show) (getWeights nn)
+      alpha = 3.5
+  putStrLn $ "Initial Weights:\n"
+  mapM_ (putStrLn . show) (getWeights nn)
   putStrLn "Initial run:\n"
   putStrLn $ show $ runNN nn input
-  
+
   let target = map (1><1) [[0],[1],[1],[0]] :: [Matrix Double]
       trainingSet = zip rawSet target
       output = runNN nn input
@@ -226,12 +225,12 @@ test fp = do
   let ts = vector [1.. fromIntegral nbPasses]
   let graph = do
         plot (ts, [linepoint (vector (reverse costs)) (1.0::LineWidth, blue) (Cross, blue)])
-  
+
         title "Cost Function"
         subtitle $ "alpha = " ++ show alpha ++ "\n" ++ show nbPasses ++ " passes"
-  
+
         xlabel "# Pass"
         ylabel "Cost"
         grid True
-  
+
   writeFigure PNG fp (1024, 768) graph
